@@ -1,0 +1,670 @@
+# ==============================================================================
+# BAGASSE FIBER MD — COMPLETE PIPELINE (SINGLE FILE)
+# CHARMM36/CGenFF/TIP3P | 97,083 atoms
+# ==============================================================================
+# INPUT : structure_ready_fixed_nopaircoeffs.data
+#
+# PIPELINE:
+#   STAGE 0 : Soft minimization -> CHARMM36 minimization -> Langevin heating
+#   STAGE 1 : NVT heating 10K -> 300K (Langevin + nve/limit)
+#   STAGE 2 : Density compression 0.98 -> 1.20 g/cm3 (fix deform)
+#   STAGE 3 : Density correction 1.20 -> 1.35 g/cm3 + production
+#   STAGE 4 : NPT 300K/1atm + NVT + NVE tensile (1% strain)
+#
+# CRASH FIXES APPLIED (learned from ALL previous runs):
+#   - B9a/B9b/B9c: fix nvt REMOVED -> Langevin+nve/limit used instead
+#     (root cause: Fmax=3355 kcal/mol/A after minimize -> NVT assigns
+#      huge velocities -> bond-atoms-missing crash in <100 steps)
+#   - B8c/B8d: displace_atoms perturbation added if CG stalls at PE>3M
+#   - Stage 2 Phase 3: NPT REMOVED -> crashes on bad atom pairs
+#   - Stage 4 Phase 3: fix_modify fdef energy yes REMOVED -> not supported
+#     by fix deform (causes "Illegal fix_modify command" error)
+#   - Stage 4 Phase 1: timestep 0.1fs for NPT stability
+#   - Stage 4 Phase 2+3: timestep 0.2fs after NPT dissipates bad pairs
+#   - comm_modify cutoff 30.0 set before B9a (wider ghost region)
+#   - SHAKE uses b 29 a 57 throughout (correct TIP3P bond/angle types)
+#
+# RUN: lmp -sf omp -pk omp 8 -in bagasse_complete.lmp
+#
+# KEY OUTPUTS:
+#   tensile_results_final.txt   <- main stress-strain data (send for Python)
+#   dump_s4_final.lammpstrj     <- OVITO tensile animation
+#   after_stage3.data           <- equilibrated structure backup
+#   restart_stage4_final.bin    <- final state
+# ==============================================================================
+
+units           real
+dimension       3
+boundary        p p p
+atom_style      full
+
+neighbor        0.3 bin
+neigh_modify    every 5 delay 0 check no one 8000 page 800000
+comm_modify     cutoff 20.0
+thermo_modify   lost warn norm no
+
+bond_style      harmonic
+angle_style     harmonic
+dihedral_style  charmm
+improper_style  harmonic
+
+pair_style      soft 2.5
+pair_modify     mix arithmetic
+special_bonds   charmm
+
+read_data       structure_ready_fixed_nopaircoeffs.data
+pair_coeff      * *  1.0
+
+thermo_style    custom step pe ke etotal fmax fnorm press density
+thermo          200
+
+# ==============================================================================
+# STAGE 0 — SOFT MINIMIZATION + CHARMM36 MINIMIZE + LANGEVIN HEATING
+# ==============================================================================
+
+# ── B1: zero-pair SD ──────────────────────────────────────────────────────────
+print "### STAGE 0 B1: zero-pair SD ###"
+pair_style      zero 2.5 nocoeff
+pair_coeff      * *
+min_style       sd
+min_modify      dmax 0.01
+minimize        0  10.0  3000  30000
+write_restart   restart_s0_B1.bin
+print "### B1 DONE ###"
+
+# ── B2: soft A=1 ──────────────────────────────────────────────────────────────
+print "### STAGE 0 B2: soft A=1 ###"
+pair_style      soft 2.5
+pair_coeff      * *  1.0
+min_style       sd
+min_modify      dmax 0.01
+minimize        0  5.0  20000  200000
+write_restart   restart_s0_B2.bin
+print "### B2 DONE ###"
+
+# ── B3: soft A=10 ─────────────────────────────────────────────────────────────
+print "### STAGE 0 B3: soft A=10 ###"
+pair_coeff      * *  10.0
+min_style       sd
+min_modify      dmax 0.02
+minimize        0  2.0  20000  200000
+write_restart   restart_s0_B3.bin
+print "### B3 DONE ###"
+
+# ── B4: soft A=50 ─────────────────────────────────────────────────────────────
+print "### STAGE 0 B4: soft A=50 ###"
+pair_coeff      * *  50.0
+min_style       sd
+min_modify      dmax 0.05
+minimize        0  1.0  20000  200000
+write_restart   restart_s0_B4.bin
+print "### B4 DONE ###"
+
+# ── B5: soft A=200 ────────────────────────────────────────────────────────────
+print "### STAGE 0 B5: soft A=200 ###"
+pair_coeff      * *  200.0
+min_style       sd
+min_modify      dmax 0.1
+minimize        0  0.5  30000  300000
+write_restart   restart_s0_B5.bin
+print "### B5 DONE ###"
+
+# ── B6: soft A=500 ────────────────────────────────────────────────────────────
+print "### STAGE 0 B6: soft A=500 ###"
+pair_coeff      * *  500.0
+min_style       sd
+min_modify      dmax 0.1
+minimize        0  0.1  30000  300000
+write_restart   restart_s0_B6.bin
+print "### B6 DONE ###"
+
+# ── B7: switch to CHARMM36 — SD minimize ──────────────────────────────────────
+print "### STAGE 0 B7: CHARMM36 SD minimize ###"
+
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes one 8000 page 800000
+
+pair_style      lj/charmm/coul/long 10.0 12.0
+pair_modify     mix arithmetic
+kspace_style    pppm 1.0e-5
+special_bonds   charmm
+
+pair_coeff   1  1   0.0320  3.5640
+pair_coeff   2  2   0.0320  3.5640
+pair_coeff   3  3   0.0320  3.5640
+pair_coeff   4  4   0.1000  3.0200
+pair_coeff   5  5   0.1000  3.0200
+pair_coeff   6  6   0.1521  3.1538
+pair_coeff   7  7   0.0220  2.3520
+pair_coeff   8  8   0.0220  2.3520
+pair_coeff   9  9   0.0220  2.3520
+pair_coeff  10 10   0.0320  3.5640
+pair_coeff  11 11   0.0700  3.5500
+pair_coeff  12 12   0.0320  3.5640
+pair_coeff  13 13   0.0560  3.5640
+pair_coeff  14 14   0.0780  3.5640
+pair_coeff  15 15   0.1521  3.1538
+pair_coeff  16 16   0.1000  3.0200
+pair_coeff  17 17   0.1000  3.0200
+pair_coeff  18 18   0.1521  3.1507
+pair_coeff  19 19   0.0460  0.4000
+
+min_style       sd
+min_modify      dmax 0.05
+dump            d7 all custom 5000 s0_b7.lammpstrj id type x y z
+dump_modify     d7 sort id
+minimize        0  2.0  50000  500000
+undump          d7
+write_restart   restart_s0_B7.bin
+print "### B7 DONE ###"
+
+# ── B8a: SD polish ────────────────────────────────────────────────────────────
+print "### STAGE 0 B8a: SD polish ###"
+min_style       sd
+min_modify      dmax 0.02
+minimize        0  5.0  50000  500000
+write_restart   restart_s0_B8a.bin
+print "### B8a DONE ###"
+
+# ── B8b: CG deep minimize ─────────────────────────────────────────────────────
+print "### STAGE 0 B8b: CG deep minimize ###"
+min_style       cg
+min_modify      dmax 0.1 line forcezero
+dump            d8 all custom 5000 s0_b8.lammpstrj id type x y z
+dump_modify     d8 sort id
+minimize        0  1.0e-3  200000  2000000
+undump          d8
+write_restart   restart_s0_B8b.bin
+print "### B8b DONE ###"
+print "### CHECK PE here - if > 3,000,000 kcal/mol, run B8c/B8d below ###"
+
+# ── B8c: random perturbation (only needed if CG stalled at PE > 3M) ───────────
+# This breaks the symmetry that causes alpha=0 in CG minimizer.
+# If PE < 3M after B8b, these steps still run but are harmless.
+print "### STAGE 0 B8c: random perturbation to escape stalled minimizer ###"
+displace_atoms  all random 0.05 0.05 0.05 12345
+
+print "### STAGE 0 B8c: SD after perturbation dmax=0.01 ###"
+min_style       sd
+min_modify      dmax 0.01
+minimize        0  5.0  50000  500000
+write_restart   restart_s0_B8c.bin
+print "### B8c SD done ###"
+
+print "### STAGE 0 B8d: CG after perturbation ###"
+min_style       cg
+min_modify      dmax 0.05 line forcezero
+minimize        0  1.0e-3  100000  1000000
+write_restart   restart_s0_B8d.bin
+print "### B8d CG done - PE should now be < 3,000,000 kcal/mol ###"
+
+# ── B9a: Langevin at 1K (pre-heat, crash-safe) ────────────────────────────────
+# FIX: nve/limit caps displacement -> prevents bond-atoms-missing crash.
+# NO fix nvt here — Nose-Hoover assigns huge velocities to strained pairs.
+# comm cutoff 30.0: wider ghost region to survive large force spikes.
+print "### STAGE 0 B9a: Langevin 1K pre-heat (nve/limit) ###"
+
+comm_modify     cutoff 30.0
+reset_timestep  0
+timestep        0.5
+
+fix             ws0a all shake 0.0001 20 0 b 29 a 57
+velocity        all create 1.0 11111 rot yes dist gaussian
+fix             fL0a all langevin 1.0 1.0 10.0 12345
+fix             fN0a all nve/limit 0.05
+
+thermo_style    custom step temp pe ke etotal press density
+thermo          500
+run             10000
+
+unfix           fL0a
+unfix           fN0a
+unfix           ws0a
+write_restart   restart_s0_B9a.bin
+print "### B9a DONE ###"
+
+# ── B9b: Langevin warmup 1K -> 300K (CRASH-SAFE: nve/limit NOT nvt) ──────────
+# Three sub-stages: 1->30K, 30->150K, 150->300K (from recover_b9a.lmp)
+# Prevents temperature overshoot that caused crash in earlier runs.
+print "### STAGE 0 B9b-i: Langevin ramp 1K->30K ###"
+
+reset_timestep  0
+timestep        0.2
+
+fix             fL0bi all langevin 1.0 30.0 50.0 11111
+fix             fN0bi all nve/limit 0.005
+run             25000
+unfix           fL0bi
+unfix           fN0bi
+write_restart   restart_s0_B9bi.bin
+print "### B9b-i done ###"
+
+print "### STAGE 0 B9b-ii: Langevin ramp 30K->150K ###"
+
+reset_timestep  0
+timestep        0.5
+
+fix             fL0bii all langevin 30.0 150.0 100.0 22222
+fix             fN0bii all nve/limit 0.02
+run             30000
+unfix           fL0bii
+unfix           fN0bii
+write_restart   restart_s0_B9bii.bin
+print "### B9b-ii done ###"
+
+print "### STAGE 0 B9b-iii: Langevin ramp 150K->300K ###"
+
+reset_timestep  0
+timestep        0.5
+
+fix             fL0biii all langevin 150.0 300.0 100.0 33333
+fix             fN0biii all nve/limit 0.05
+run             30000
+unfix           fL0biii
+unfix           fN0biii
+write_restart   restart_s0_B9biii.bin
+print "### B9b-iii done ###"
+
+# ── B9b-iv: Drain excess KE if temp overshot ──────────────────────────────────
+# Langevin with tight tdamp=50fs pulls temp back to 300K quickly.
+# (from recover_b9biii.lmp — fixes 426K overshoot case)
+print "### STAGE 0 B9b-iv: Langevin 300K stabilization ###"
+
+reset_timestep  0
+timestep        0.5
+
+fix             fL0biv all langevin 300.0 300.0 50.0 44444
+fix             fN0biv all nve/limit 0.05
+run             40000
+unfix           fL0biv
+unfix           fN0biv
+write_restart   restart_s0_B9biv.bin
+print "### B9b-iv done — temp should be ~300K ###"
+
+# ── B9c: Langevin 300K production 50ps (CRASH-SAFE: nve/limit NOT nvt) ────────
+# Phase A/B/C from recover_b9biv_final.lmp — the proven final approach.
+# nve/limit 0.2 generous enough for normal MD but prevents any blowup.
+# SHAKE re-added for water geometry (b29=HT-OT, a57=HT-OT-HT).
+print "### STAGE 0 B9c Phase A: Langevin 300K + nve/limit 0.05 at 0.5fs — 20ps ###"
+
+reset_timestep  0
+timestep        0.5
+
+fix             ws0c all shake 0.0001 20 500 b 29 a 57
+fix             fL0cA all langevin 300.0 300.0 100.0 55555
+fix             fN0cA all nve/limit 0.05
+run             40000
+unfix           fL0cA
+unfix           fN0cA
+write_restart   restart_s0_phA.bin
+print "### B9c Phase A done ###"
+
+print "### STAGE 0 B9c Phase B: Langevin 300K + nve/limit 0.1 at 1fs — 30ps ###"
+
+reset_timestep  0
+timestep        1.0
+
+fix             fL0cB all langevin 300.0 300.0 100.0 66666
+fix             fN0cB all nve/limit 0.1
+run             30000
+unfix           fL0cB
+unfix           fN0cB
+write_restart   restart_s0_phB.bin
+print "### B9c Phase B done ###"
+
+print "### STAGE 0 B9c Phase C: production 300K Langevin + nve/limit — 50ps ###"
+
+reset_timestep  0
+timestep        1.0
+
+fix             fL0cC all langevin 300.0 300.0 100.0 77777
+fix             fN0cC all nve/limit 0.2
+
+thermo_style    custom step temp pe ke etotal press vol density
+thermo          500
+
+dump            d9 all custom 10000 s0_b9.lammpstrj id type x y z
+dump_modify     d9 sort id
+restart         10000 restart_s0_PhDprod.*.bin
+
+run             50000
+
+undump          d9
+unfix           fL0cC
+unfix           fN0cC
+unfix           ws0c
+
+write_restart   restart_stage0.bin
+write_data      after_stage0.data
+
+print " "
+print "============================================================"
+print "  STAGE 0 COMPLETE"
+print "  after_stage0.data + restart_stage0.bin saved"
+print "  Expected: Temp ~300K (+/-30K fine with Langevin)"
+print "  Expected: Density ~0.98 g/cm3"
+print "  Expected: PE 200,000 - 600,000 kcal/mol"
+print "============================================================"
+
+# ==============================================================================
+# STAGE 1 — NVT HEATING 10K -> 300K
+# ==============================================================================
+print " "
+print "============================================================"
+print "  STARTING STAGE 1 — NVT HEATING"
+print "============================================================"
+
+velocity        all create 10.0 99999 rot yes dist gaussian
+timestep        1.0
+fix             ws1 all shake 0.0001 20 500 b 29 a 57
+thermo_style    custom step temp pe ke etotal press vol density
+thermo          500
+
+# ── Phase 1: 10K -> 300K ramp 50ps ────────────────────────────────────────────
+print "### Stage 1 Phase 1: 10K->300K ramp 50ps ###"
+reset_timestep  0
+fix             fL1a all langevin 10.0 300.0 100.0 11111
+fix             fN1a all nve/limit 0.05
+dump            d1a all custom 5000 dump_s1_ramp.lammpstrj id type x y z vx vy vz
+dump_modify     d1a sort id
+restart         10000 restart_s1_ph1.*.bin
+run             50000
+undump          d1a
+unfix           fL1a
+unfix           fN1a
+write_restart   restart_s1_ph1.bin
+print "### Stage 1 Phase 1 DONE ###"
+
+# ── Phase 2: 300K hold 50ps ───────────────────────────────────────────────────
+print "### Stage 1 Phase 2: 300K hold 50ps ###"
+reset_timestep  0
+fix             fL1b all langevin 300.0 300.0 100.0 22222
+fix             fN1b all nve/limit 0.1
+dump            d1b all custom 2000 dump_s1_hold.lammpstrj id type x y z vx vy vz
+dump_modify     d1b sort id
+restart         10000 restart_s1_ph2.*.bin
+run             50000
+undump          d1b
+unfix           fL1b
+unfix           fN1b
+write_restart   restart_s1_ph2.bin
+print "### Stage 1 Phase 2 DONE ###"
+
+# ── Phase 3: 300K hold 50ps ───────────────────────────────────────────────────
+print "### Stage 1 Phase 3: 300K hold 50ps ###"
+reset_timestep  0
+fix             fL1c all langevin 300.0 300.0 100.0 33333
+fix             fN1c all nve/limit 0.1
+dump            d1c all custom 2000 dump_s1_equil.lammpstrj id type x y z vx vy vz
+dump_modify     d1c sort id
+restart         10000 restart_s1_ph3.*.bin
+run             50000
+undump          d1c
+unfix           fL1c
+unfix           fN1c
+unfix           ws1
+
+write_restart   restart_stage1.bin
+
+print " "
+print "============================================================"
+print "  STAGE 1 COMPLETE"
+print "  restart_stage1.bin saved"
+print "  Expected: Temp 285-315K, PE stable"
+print "============================================================"
+
+# ==============================================================================
+# STAGE 2 — DENSITY COMPRESSION 0.98 -> 1.20 g/cm3
+# ==============================================================================
+print " "
+print "============================================================"
+print "  STARTING STAGE 2 — DENSITY COMPRESSION"
+print "============================================================"
+
+velocity        all create 300.0 88888 rot yes dist gaussian
+timestep        1.0
+fix             ws2 all shake 0.0001 20 500 b 29 a 57
+thermo_style    custom step temp pe ke etotal press vol density
+thermo          500
+fix             dens_log all print 500 "$(step) $(density)" &
+                file density_log.txt title "# step density" screen no
+
+# ── Phase 1: compress 0.98 -> 1.20 g/cm3 over 200ps ──────────────────────────
+# erate = -2.95e-7 /step for all 3 dimensions (80 -> 75 A)
+print "### Stage 2 Phase 1: compress 0.98->1.20 g/cm3 over 200ps ###"
+reset_timestep  0
+fix             fL2a all langevin 300.0 300.0 100.0 11111
+fix             fN2a all nve/limit 0.15
+fix             fdef2 all deform 1 x erate -2.95e-7 y erate -2.95e-7 &
+                z erate -2.95e-7 remap x
+dump            d2a all custom 5000 dump_s2_phase1.lammpstrj id type x y z vx vy vz
+dump_modify     d2a sort id
+restart         20000 restart_s2_ph1.*.bin
+run             200000
+undump          d2a
+unfix           fdef2
+unfix           fL2a
+unfix           fN2a
+write_restart   restart_s2_ph1.bin
+print "### Stage 2 Phase 1 DONE — density should be ~1.20 g/cm3 ###"
+
+# ── Phase 2: hold 200ps ────────────────────────────────────────────────────────
+# NOTE: Stage 2 Phase 3 NPT is INTENTIONALLY OMITTED.
+# Bad atom pairs that survived all MD still crash NPT barostat here.
+# Stage 3 achieves further compression via fix deform instead.
+print "### Stage 2 Phase 2: hold 1.20 g/cm3 equilibration 200ps ###"
+reset_timestep  0
+fix             fL2b all langevin 300.0 300.0 100.0 22222
+fix             fN2b all nve/limit 0.2
+dump            d2b all custom 5000 dump_s2_phase2.lammpstrj id type x y z vx vy vz
+dump_modify     d2b sort id
+restart         20000 restart_s2_ph2.*.bin
+run             200000
+undump          d2b
+unfix           fL2b
+unfix           fN2b
+unfix           ws2
+unfix           dens_log
+
+write_restart   restart_s2_ph2.bin
+
+print " "
+print "============================================================"
+print "  STAGE 2 COMPLETE"
+print "  restart_s2_ph2.bin saved  (used directly by Stage 3)"
+print "  Expected: Density ~1.17 g/cm3"
+print "  NOTE: Stage 2 Phase 3 NPT INTENTIONALLY SKIPPED"
+print "  Stage 3 will compress further to correct cell wall density"
+print "============================================================"
+
+# ==============================================================================
+# STAGE 3 — DENSITY CORRECTION 1.17 -> 1.35 g/cm3 + PRODUCTION
+# ==============================================================================
+print " "
+print "============================================================"
+print "  STARTING STAGE 3 — DENSITY CORRECTION TO CELL WALL TARGET"
+print "============================================================"
+
+velocity        all create 300.0 77777 rot yes dist gaussian
+timestep        1.0
+fix             ws3 all shake 0.0001 20 500 b 29 a 57
+thermo_style    custom step temp pe ke etotal press vol density
+thermo          500
+fix             dens_log3 all print 500 "$(step) $(density)" &
+                file density_s3_log.txt title "# step density" screen no
+
+# ── Phase 1: compress 1.17 -> 1.35 g/cm3 over 150ps ──────────────────────────
+# Current box ~75.44 x 75.40 x 202.53 A at 1.1737 g/cm3
+# Target box  ~72.00 x 71.97 x 193.30 A at 1.35 g/cm3
+# erate = -3.038e-7 /step for x, y, z over 150,000 steps
+print "### Stage 3 Phase 1: compress 1.1737->1.35 g/cm3 over 150ps ###"
+reset_timestep  0
+fix             fL3a all langevin 300.0 300.0 100.0 11111
+fix             fN3a all nve/limit 0.15
+fix             fdef3 all deform 1 x erate -3.038e-7 y erate -3.038e-7 &
+                z erate -3.038e-7 remap x
+dump            d3a all custom 5000 dump_s3_compress.lammpstrj id type x y z vx vy vz
+dump_modify     d3a sort id
+restart         20000 restart_s3_ph1.*.bin
+run             150000
+undump          d3a
+unfix           fdef3
+unfix           fL3a
+unfix           fN3a
+write_restart   restart_s3_ph1.bin
+print "### Stage 3 Phase 1 DONE — density should be ~1.35 g/cm3 ###"
+
+# ── Phase 2: hold 200ps ────────────────────────────────────────────────────────
+print "### Stage 3 Phase 2: hold equilibration 1.35 g/cm3 200ps ###"
+reset_timestep  0
+fix             fL3b all langevin 300.0 300.0 100.0 22222
+fix             fN3b all nve/limit 0.2
+dump            d3b all custom 5000 dump_s3_equil.lammpstrj id type x y z vx vy vz
+dump_modify     d3b sort id
+restart         20000 restart_s3_ph2.*.bin
+run             200000
+undump          d3b
+unfix           fL3b
+unfix           fN3b
+write_restart   restart_s3_ph2.bin
+print "### Stage 3 Phase 2 DONE ###"
+
+# ── Phase 3: production 200ps ─────────────────────────────────────────────────
+print "### Stage 3 Phase 3: production 300K 200ps ###"
+reset_timestep  0
+fix             fL3c all langevin 300.0 300.0 100.0 33333
+fix             fN3c all nve/limit 0.2
+dump            d3c all custom 1000 dump_s3_prod.lammpstrj id type x y z vx vy vz
+dump_modify     d3c sort id
+restart         20000 restart_s3_ph3.*.bin
+run             200000
+undump          d3c
+unfix           fL3c
+unfix           fN3c
+unfix           ws3
+unfix           dens_log3
+
+write_restart   restart_stage3.bin
+write_data      after_stage3.data
+
+print " "
+print "============================================================"
+print "  STAGE 3 COMPLETE"
+print "  restart_stage3.bin + after_stage3.data saved"
+print "  Expected: Density 1.32-1.40 g/cm3  (Q1 target)"
+print "============================================================"
+
+# ==============================================================================
+# STAGE 4 — NPT 300K/1atm + NVT + NVE TENSILE
+# ==============================================================================
+print " "
+print "============================================================"
+print "  STARTING STAGE 4 — NPT EQUILIBRATION + TENSILE"
+print "============================================================"
+
+velocity        all create 300.0 44444 rot yes dist gaussian
+fix             ws4 all shake 0.0001 20 500 b 29 a 57
+thermo_style    custom step temp pe ke etotal press vol density
+thermo          1000
+
+# ── Phase 1: NPT 300K 1atm 100ps @ 0.1fs ────────────────────────────────────
+# MUST use 0.1fs here — bad atom pairs still present after Stage 3.
+# Large damping constants (500/5000): gentle = stable for fragile system.
+# PE drops ~35% during this phase as bad pairs resolve.
+print "### Stage 4 Phase 1: NPT 300K 1atm 1,000,000 steps @ 0.1fs ###"
+print "### WATCH first 3000 steps — crash check ###"
+
+timestep        0.1
+reset_timestep  0
+
+fix             fNPT all npt temp 300.0 300.0 500.0 iso 1.0 1.0 5000.0
+restart         200000 restart_s4_npt.*.bin
+run             1000000
+
+unfix           fNPT
+write_restart   restart_s4_npt_done.bin
+print "### Stage 4 Phase 1 NPT DONE ###"
+print "### Expected: Temp 280-320K  Press ~1 atm  Density 1.33-1.37 ###"
+
+# ── Phase 2: NVT 300K 50ps @ 0.2fs ──────────────────────────────────────────
+# 0.2fs safe now — NPT dissipated bad pair energies in Phase 1.
+# NVT locks temperature before tensile deformation.
+print "### Stage 4 Phase 2: NVT 300K 250,000 steps @ 0.2fs ###"
+
+timestep        0.2
+reset_timestep  0
+
+fix             fNVT all nvt temp 300.0 300.0 500.0
+restart         50000 restart_s4_nvt.*.bin
+run             250000
+
+unfix           fNVT
+write_restart   restart_s4_nvt_done.bin
+print "### Stage 4 Phase 2 NVT DONE ###"
+print "### Expected: Temp 285-315K stable ###"
+
+# ── Phase 3: NVE tensile 1% strain @ 0.2fs ───────────────────────────────────
+# NVE = most rigorous ensemble for tensile (Q1 standard).
+# Strain rate 1e-7/fs = 1e8/s (Dri 2014, Sinko 2015).
+# 500,000 steps x 0.2fs x 1e-7/fs = 0.01 = 1% strain.
+# Output every 100 steps -> 5000 data points for stress-strain curve.
+#
+# NOTE: fix_modify fdef energy yes is intentionally NOT used.
+# It is not supported by fix deform and causes:
+#   "ERROR: Illegal fix_modify command"
+print "### Stage 4 Phase 3: NVE Tensile 1% strain 500,000 steps @ 0.2fs ###"
+
+timestep        0.2
+reset_timestep  0
+
+compute         satom all stress/atom NULL
+compute         pxx all reduce sum c_satom[1]
+compute         pyy all reduce sum c_satom[2]
+compute         pzz all reduce sum c_satom[3]
+
+variable        vol equal vol
+variable        sigma_zz equal -c_pzz/v_vol*0.101325
+variable        sigma_xx equal -c_pxx/v_vol*0.101325
+variable        sigma_yy equal -c_pyy/v_vol*0.101325
+
+# Run 0 to lock reference box dimensions AFTER reset_timestep
+# This ensures strain = 0 at the true starting geometry.
+run             0
+variable        Lz0 equal lz
+variable        Lx0 equal lx
+variable        Ly0 equal ly
+variable        strain equal (lz-v_Lz0)/v_Lz0
+
+fix             fNVE all nve
+fix             fdef all deform 1 z erate 1.0e-7 remap x
+
+fix             fout all print 100 &
+                "$(v_strain) $(v_sigma_zz) $(v_sigma_xx) $(v_sigma_yy) $(pe) $(temp) $(lz) $(lx) $(ly)" &
+                file tensile_results_final.txt &
+                title "strain sigma_zz_MPa sigma_xx_MPa sigma_yy_MPa PE_kcal Temp_K Lz_A Lx_A Ly_A" &
+                screen no
+
+dump            d4 all custom 25000 dump_s4_final.lammpstrj id type x y z vx vy vz
+dump_modify     d4 sort id
+restart         100000 restart_s4_tens.*.bin
+
+run             500000
+
+undump          d4
+unfix           fout
+unfix           fdef
+unfix           fNVE
+unfix           ws4
+
+write_restart   restart_stage4_final.bin
+
+print " "
+print "============================================================"
+print "  FULL PIPELINE COMPLETE"
+print "------------------------------------------------------------"
+print "  tensile_results_final.txt   <- stress-strain data (MAIN)"
+print "  dump_s4_final.lammpstrj     <- OVITO tensile animation"
+print "  after_stage3.data           <- equilibrated structure backup"
+print "  restart_stage4_final.bin    <- final state"
+print "------------------------------------------------------------"
+
