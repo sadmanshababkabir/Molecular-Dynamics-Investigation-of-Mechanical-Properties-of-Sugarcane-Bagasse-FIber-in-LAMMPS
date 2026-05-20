@@ -1,0 +1,2 @@
+# Molecular-Dynamics-Investigation-of-Mechanical-Properties-of-Sugarcane-Bagasse-FIber-in-LAMMPS
+This repository provides a LAMMPS molecular dynamics pipeline for atomistic characterization of sugarcane bagasse fiber. A 97,083-atom cellulose–hemicellulose–lignin model with TIP3P water is simulated under periodic conditions to obtain density, stress–strain response, Young’s modulus, and tensile strength properties.
