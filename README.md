@@ -50,8 +50,6 @@ The repository provides:
 ## Hardware and Software
 
 - **LAMMPS:** 29 Aug 2024
-- **Execution mode:** OMP-only (8 threads)
-- **Processor:** AMD Ryzen 7 5700X
 - **Operating system:** Windows 11 with WSL Ubuntu
 - **Python:** 3.13
 - **Analysis libraries:** NumPy, Matplotlib, SciPy
@@ -70,13 +68,7 @@ This repository can support research in:
 
 The main objective of this work is to provide a reliable and reusable atomistic simulation pipeline for understanding the deformation behavior and mechanical performance of sugarcane bagasse fiber. The workflow is suitable for future extension to chemically modified fibers, moisture-dependent systems, and hybrid bio-composite materials.
 
-## Citation
 
-If this repository contributes to your research, please cite the associated journal article or acknowledge this project appropriately.
-
-## License
-
-Add your preferred license here.
 
 ## Author
 
